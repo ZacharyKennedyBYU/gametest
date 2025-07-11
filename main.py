@@ -80,7 +80,7 @@ def fire_hitscan():
 def fire_rocket():
     print("Firing Rocket!")
     # Simulate rocket projectile and explosion point
-    hit_info = raycast(camera.world_position, camera.forward, distance=100, ignore=[player,], thickness=0.5) # Added thickness for rocket
+    hit_info = raycast(camera.world_position, camera.forward, distance=100, ignore=[player,]) # Removed thickness argument
 
     explosion_point = hit_info.world_point if hit_info.hit else player.camera_pivot.world_position + camera.forward * 100
 
