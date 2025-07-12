@@ -61,7 +61,8 @@ def update():
     global bob_timer
     # Camera Bobbing
     # Check if player is moving on the xz plane
-    is_moving = abs(player.velocity[0]) > 0.1 or abs(player.velocity[2]) > 0.1
+    # is_moving = abs(player.velocity[0]) > 0.1 or abs(player.velocity[2]) > 0.1 # Incorrect: FPC has no 'velocity' attribute
+    is_moving = player.moving # Correct way to check if FPC is moving
 
     if is_moving and player.grounded: # Bob only when moving and grounded
         bob_timer += time.dt * bob_frequency
