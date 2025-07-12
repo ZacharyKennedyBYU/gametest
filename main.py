@@ -1,6 +1,7 @@
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 import random # Ensure random is imported
+from math import radians, cos, sin # Import necessary math functions
 
 # Initialize the Ursina application
 app = Ursina()
