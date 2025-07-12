@@ -189,7 +189,7 @@ def shoot():
         # Kick up
         weapon_model_to_recoil.animate_rotation_x(original_rotation.x + recoil_amount, duration=0.05, curve=curve.out_sine)
         # Return to original
-        weapon_model_to_recoil.animate_rotation_x(original_rotation.x, duration=0.1, delay=0.05, curve=curve.ease_in_out_sine)
+        weapon_model_to_recoil.animate_rotation_x(original_rotation.x, duration=0.1, delay=0.05, curve=curve.in_out_sine) # Corrected curve name
 
 
     if player.current_weapon == WEAPON_HITSCAN:
