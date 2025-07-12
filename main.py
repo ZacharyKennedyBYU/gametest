@@ -1,7 +1,7 @@
 from ursina import *
 from ursina.prefabs.first_person_controller import FirstPersonController
 import random # Ensure random is imported
-from math import radians, cos, sin # Import necessary math functions
+from math import radians, cos, sin, sqrt, atan2 # Import necessary math functions, including sqrt and atan2 for safety although often pulled in by ursina
 
 # Initialize the Ursina application
 app = Ursina()
@@ -29,6 +29,14 @@ player.current_weapon = available_weapons[current_weapon_index]
 
 # HUD Elements
 health_text = Text(text=f"Health: {player.health}", parent=camera.ui, origin=(-.5, .5), position=(-0.85, 0.45), scale=1.5, color=color.green)
+# Minimap / Radar
+minimap_size = 0.2
+minimap_pos = (-0.88, -0.38) # Bottom left corner
+minimap_background = Entity(parent=camera.ui, model='quad', color=color.rgba(0,0,0,100), scale=minimap_size, position=minimap_pos)
+minimap_player_dot = Entity(parent=minimap_background, model='circle', color=color.cyan, scale=0.05) # Player is always center
+radar_range = 50 # World units range for radar
+enemy_dots = []
+
 
 # Add a sky
 Sky()
@@ -113,8 +121,10 @@ def player_take_damage(amount):
     if player.health <= 0: # Already game over
         return
     player.health -= amount
+    Audio('sounds/player_hurt.wav', autoplay=True, volume=0.6) # Conceptual sound
     print(f"Player took {amount} damage, health is now {player.health}")
     if player.health <= 0:
+        Audio('sounds/player_die.wav', autoplay=True, volume=0.7) # Conceptual sound
         game_over()
 
 def game_over():
@@ -169,6 +179,19 @@ update_weapon_model()
 
 def shoot():
     print(f"Shooting {player.current_weapon}")
+
+    # Recoil Animation
+    weapon_model_to_recoil = gun_model if player.current_weapon == WEAPON_HITSCAN else rocket_launcher_model
+    if weapon_model_to_recoil.visible:
+        original_rotation = weapon_model_to_recoil.rotation
+        recoil_amount = -10 if player.current_weapon == WEAPON_HITSCAN else -15 # Degrees upward kick for x-axis
+
+        # Kick up
+        weapon_model_to_recoil.animate_rotation_x(original_rotation.x + recoil_amount, duration=0.05, curve=curve.out_sine)
+        # Return to original
+        weapon_model_to_recoil.animate_rotation_x(original_rotation.x, duration=0.1, delay=0.05, curve=curve.ease_in_out_sine)
+
+
     if player.current_weapon == WEAPON_HITSCAN:
         fire_hitscan()
     elif player.current_weapon == WEAPON_ROCKET_LAUNCHER:
@@ -184,6 +207,12 @@ def fire_hitscan():
     bullet_trail.fade_out(duration=0.1) # Changed from animate_alpha
     destroy(bullet_trail, delay=0.15)
 
+    # Muzzle flash for hitscan
+    muzzle_flash_hitscan = Entity(parent=gun_model, model='sphere', color=color.yellow, scale=0.3, position=(0, 0.1, 1)) # Positioned relative to gun model's front
+    muzzle_flash_hitscan.animate_scale(0, duration=0.1)
+    destroy(muzzle_flash_hitscan, delay=0.1)
+    Audio('sounds/gun_shoot.wav', autoplay=True, volume=0.5) # Conceptual sound
+
     hit_info = raycast(camera.world_position, camera.forward, distance=100, ignore=[player,])
     if hit_info.hit:
         print(f"Hitscan hit: {hit_info.entity}")
@@ -193,6 +222,13 @@ def fire_hitscan():
 
 def fire_rocket():
     print("Firing Rocket!")
+
+    # Muzzle flash for rocket launcher
+    muzzle_flash_rocket = Entity(parent=rocket_launcher_model, model='sphere', color=color.rgba(255,165,0,200), scale=0.5, position=(0, 0, 0.7)) # Positioned relative to rocket launcher model's front
+    muzzle_flash_rocket.animate_scale(0, duration=0.2)
+    destroy(muzzle_flash_rocket, delay=0.2)
+    Audio('sounds/rocket_shoot.wav', autoplay=True, volume=0.7) # Conceptual sound
+
     # Simulate rocket projectile and explosion point
     hit_info = raycast(camera.world_position, camera.forward, distance=100, ignore=[player,]) # Removed thickness argument
 
@@ -203,6 +239,7 @@ def fire_rocket():
     explosion_effect.animate_scale(5, duration=0.4, curve=curve.out_expo) # Larger explosion
     explosion_effect.animate_color(color.rgba(255,100,0,0), duration=0.4, delay=0.1) # Fade out
     destroy(explosion_effect, delay=0.5)
+    Audio('sounds/explosion.wav', autoplay=True, volume=0.8, position=explosion_point) # Conceptual sound, 3D position
 
     # Apply knockback in a radius
     blast_radius = 8
@@ -277,6 +314,11 @@ class Enemy(Entity): # Renamed Target to Enemy
         self.mass_factor = mass_factor
         self.drag_factor = 1.5 # How quickly knockback velocity decays
 
+        # Behavior timers/states
+        self.state = 'seeking' # 'seeking', 'strafing', 'attacking_pause'
+        self.state_timer = 0
+        self.strafe_direction = 1 # 1 for right, -1 for left
+
     def update(self):
         # Apply and dampen external velocity
         self.position += self.external_velocity * time.dt
@@ -302,21 +344,49 @@ class Enemy(Entity): # Renamed Target to Enemy
             self.look_at_2d(player.position, 'y') # look_at_2d ignores y difference
 
             # Move towards player
-            move_direction = (player.position - self.position).normalized()
-            self.position += move_direction * self.speed * time.dt
+            # Behavior state machine
+            self.state_timer -= time.dt
 
-            # Attack if close enough and cooldown ready
-            if dist_to_player < 2 and self.attack_cooldown_timer <= 0: # Attack range
+            if self.state == 'attacking_pause':
+                if self.state_timer <= 0:
+                    self.state = 'seeking' # Resume seeking after pause
+
+            elif self.state == 'strafing':
+                if self.state_timer <= 0:
+                    self.state = 'seeking'
+                else:
+                    # Strafe: move perpendicular to player
+                    perp_direction = Vec3(player.z - self.z, 0, -(player.x - self.x)).normalized() * self.strafe_direction
+                    self.position += perp_direction * self.speed * 0.75 * time.dt # Strafe slower
+                    self.look_at_2d(player.position, 'y') # Keep looking at player
+
+            elif self.state == 'seeking':
+                move_direction = (player.position - self.position).normalized()
+                self.position += move_direction * self.speed * time.dt
+                self.look_at_2d(player.position, 'y')
+
+                # Chance to start strafing if not too close and not cooling down from attack
+                if dist_to_player > 5 and random.random() < 0.01 and self.attack_cooldown_timer <= self.attack_cooldown_duration - 0.5 : # Low chance each frame
+                    self.state = 'strafing'
+                    self.state_timer = random.uniform(0.5, 1.5) # Strafe for 0.5-1.5 seconds
+                    self.strafe_direction = random.choice([-1, 1])
+                    print(f"Enemy {self.name} starts strafing.")
+
+            # Attack if close enough and cooldown ready (regardless of seeking/strafing state if close)
+            if dist_to_player < 2.5 and self.attack_cooldown_timer <= 0: # Attack range slightly increased
                 print(f"Enemy {self.name} attacks player!")
                 player_take_damage(self.attack_damage)
                 self.attack_cooldown_timer = self.attack_cooldown_duration
-                # Simple attack animation (e.g., quick scale change)
+                self.state = 'attacking_pause' # Pause briefly after attacking
+                self.state_timer = 0.5 # Pause for 0.5 seconds
+                # Simple attack animation
                 self.animate_scale(self.scale * 1.2, duration=0.1, curve=curve.out_sine)
                 self.animate_scale(self.scale, duration=0.1, delay=0.1, curve=curve.in_sine)
 
 
     def hit(self, damage=50, is_explosion=False):
         self.health -= damage
+        Audio('sounds/enemy_hurt.wav', autoplay=True, volume=0.4, position=self.world_position) # Conceptual sound
         print(f"Enemy {self.name} hit. Health: {self.health}/{self.max_health}")
 
         # Become aggressive if hit
@@ -326,6 +396,7 @@ class Enemy(Entity): # Renamed Target to Enemy
 
 
         if self.health <= 0:
+            Audio('sounds/enemy_die.wav', autoplay=True, volume=0.5, position=self.world_position) # Conceptual sound
             if is_explosion:
                 print(f"Enemy {self.name} at {self.position} was destroyed by an explosion!")
             else:
@@ -333,6 +404,41 @@ class Enemy(Entity): # Renamed Target to Enemy
             destroy(self)
         else:
             self.blink(color.white, duration=0.15) # Blink white when hit
+            # Chance to drop health pickup if not an explosion kill (to avoid clutter from AoE)
+            if not is_explosion and random.random() < 0.25: # 25% chance
+                HealthPickup(position=self.position + Vec3(0,0.5,0)) # Spawn slightly above ground
+
+
+class HealthPickup(Entity):
+    def __init__(self, position=(0,1,0), heal_amount=25):
+        super().__init__(
+            parent=scene,
+            model='sphere', # Could be a cross or something more distinct
+            collider='sphere',
+            color=color.rgb(0, 255, 0, 200), # Bright green, slightly transparent
+            position=position,
+            scale=0.5
+        )
+        self.heal_amount = heal_amount
+        self.rotation_speed = 50
+        self.start_y = self.y # Store initial y for bobbing
+        # Add a light glow (optional, might impact performance if many)
+        # self.point_light = PointLight(parent=self, color=color.green, range=10, shadows=False)
+
+
+    def update(self):
+        # Make it visually distinct - bobbing and spinning
+        self.rotation_y += self.rotation_speed * time.dt
+        self.y = self.start_y + sin(time.time() * 2) * 0.1 # Bobbing effect
+
+        # Check for collision with player
+        if self.enabled and distance_xz(player.position, self.position) < 1.5: # Collision check radius
+            if player.health < player.max_health:
+                player.health = min(player.max_health, player.health + self.heal_amount)
+                print(f"Player picked up health. Health: {player.health}")
+                Audio('sounds/pickup_health.wav', autoplay=True, volume=0.6) # Conceptual sound
+                destroy(self)
+            # else: player is at max health, do nothing to the pickup
 
 
 # Place some enemies in the scene (formerly targets)
@@ -399,6 +505,64 @@ def update(): # Override update
     _original_update() # Call original camera bobbing and health text update
     if player.health > 0: # Only check wave completion if player is alive
         check_wave_completion()
+
+    update_radar()
+
+
+def update_radar():
+    global enemy_dots
+    # Clear old dots
+    for dot in enemy_dots:
+        destroy(dot)
+    enemy_dots.clear()
+
+    if not hasattr(player, 'camera_pivot'): # Ensure player camera pivot exists
+        return
+
+    for enemy in enemies_in_scene:
+        if not enemy.enabled:
+            continue
+
+        # Vector from player to enemy
+        vec_to_enemy = enemy.world_position - player.world_position
+        dist_to_enemy = vec_to_enemy.length()
+
+        if dist_to_enemy < radar_range:
+            # Rotate the vector by the inverse of the player's y-rotation to make it player-relative
+            # Player's forward is along their local z-axis. Camera forward is what we usually care about for view.
+            # For a top-down radar, we care about player's world rotation around Y.
+
+            # Project onto XZ plane for radar
+            diff_xz = vec_to_enemy.xz
+
+            # Player's local coordinate system (on XZ plane)
+            # Forward is where the camera is looking, projected onto XZ
+            player_fwd_radar = player.forward.xz.normalized()
+            # Right is perpendicular to forward on XZ plane
+            player_right_radar = Vec2(player_fwd_radar.y, -player_fwd_radar.x) # Effectively camera.right.xz.normalized() but derived simply
+
+            # Transform enemy diff vector to player's local radar coordinates
+            # dot_x is projection onto player's right, dot_y is projection onto player's forward
+            dot_x_local = diff_xz.dot(player_right_radar)
+            dot_y_local = diff_xz.dot(player_fwd_radar)
+
+            # Scale to minimap size
+            map_scale = (minimap_size / 2) / radar_range # How much one world unit scales to map units
+
+            dot_x_on_map = dot_x_local * map_scale
+            dot_y_on_map = dot_y_local * map_scale
+
+            # Clamp dots to be within the minimap circle
+            dist_on_map_sq = dot_x_on_map**2 + dot_y_on_map**2
+            max_dist_on_map_sq = (minimap_size / 2.05)**2 # Using 2.05 to keep dots slightly inside border
+
+            if dist_on_map_sq > max_dist_on_map_sq:
+                dist_on_map_val = sqrt(dist_on_map_sq)
+                dot_x_on_map = (dot_x_on_map / dist_on_map_val) * (minimap_size / 2.05)
+                dot_y_on_map = (dot_y_on_map / dist_on_map_val) * (minimap_size / 2.05)
+
+            dot = Entity(parent=minimap_background, model='circle', color=color.red, scale=0.03, position=(dot_x_on_map, dot_y_on_map, -0.1))
+            enemy_dots.append(dot)
 
 
 # Add simple instructions
